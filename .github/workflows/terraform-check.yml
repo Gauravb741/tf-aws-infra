@@ -1,0 +1,243 @@
+# =============================================================================
+# TERRAFORM CHECK WORKFLOW
+#
+# Purpose: Fast feedback on every push and pull request.
+# Validates Terraform formatting, syntax, and security without deploying
+# anything. This is the gatekeeper — merging is blocked if these checks fail.
+#
+# Triggers:
+#   - Push to any branch
+#   - Pull request to main
+#
+# Does NOT deploy infrastructure.
+# =============================================================================
+
+name: Terraform Check
+
+on:
+  push:
+    branches:
+      - "**"
+    paths:
+      - "terraform/**"
+      - "app/**"
+      - ".github/workflows/**"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "terraform/**"
+      - "app/**"
+      - ".github/workflows/**"
+
+# Minimal permissions — this workflow only reads the repository
+permissions:
+  contents: read
+  pull-requests: write  # to post comments on PRs
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: Terraform Format Check
+  # terraform fmt -check verifies all .tf files are formatted according to
+  # Terraform's canonical style. Fails if any file needs reformatting.
+  # ---------------------------------------------------------------------------
+  terraform-fmt:
+    name: Terraform Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Check Terraform formatting (dev)
+        run: terraform fmt -check -recursive
+        working-directory: terraform/environments/dev
+
+      - name: Check Terraform formatting (prod)
+        run: terraform fmt -check -recursive
+        working-directory: terraform/environments/prod
+
+      - name: Check Terraform module formatting
+        run: terraform fmt -check -recursive
+        working-directory: terraform/modules
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Terraform Validate
+  # Validates that configuration is internally consistent and syntactically
+  # correct without contacting AWS.
+  # ---------------------------------------------------------------------------
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    needs: terraform-fmt
+
+    strategy:
+      matrix:
+        environment: [dev, prod]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Init (local backend for validation only)
+        run: |
+          # Use a local backend override just for validation
+          # This avoids needing AWS credentials or S3 bucket access
+          cat > /tmp/backend-override.tf << 'EOF'
+          terraform {
+            backend "local" {}
+          }
+          EOF
+          cp /tmp/backend-override.tf backend-override.tf
+          terraform init -backend=false
+        working-directory: terraform/environments/${{ matrix.environment }}
+
+      - name: Terraform Validate
+        run: terraform validate
+        working-directory: terraform/environments/${{ matrix.environment }}
+
+      - name: Clean up backend override
+        if: always()
+        run: rm -f backend-override.tf
+        working-directory: terraform/environments/${{ matrix.environment }}
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Security Scanning with Checkov
+  # Checkov is a static analysis tool that checks Terraform code for:
+  #   - Misconfigurations
+  #   - Security vulnerabilities
+  #   - Compliance issues
+  #
+  # Why Checkov over tfsec?
+  # Checkov has a larger rule set, is actively maintained, and produces
+  # results in SARIF format (integrates with GitHub Security tab).
+  # ---------------------------------------------------------------------------
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: terraform-validate
+
+    permissions:
+      contents: read
+      security-events: write  # to upload SARIF results
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Checkov (Terraform)
+        uses: bridgecrewio/checkov-action@v12
+        with:
+          directory: terraform/
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+          soft_fail: true  # Report issues but don't block (review results)
+          skip_check: >-
+            CKV_AWS_8,
+            CKV2_AWS_11,
+            CKV2_AWS_12
+
+          # CKV_AWS_8:    EC2 detailed monitoring — skipped to reduce cost
+          # CKV2_AWS_11:  VPC flow logs — skipped to reduce cost
+          # CKV2_AWS_12:  Default SG rules — we use custom SGs, not default
+
+      - name: Upload Checkov results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Docker Build and Security Scan
+  # Build the Docker image and scan it for vulnerabilities with Trivy.
+  # ---------------------------------------------------------------------------
+  docker-security:
+    name: Docker Build and Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: app/
+          push: false
+          tags: devops-platform-app:test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+
+      - name: Test application endpoints
+        run: |
+          # Start the container
+          docker run -d \
+            --name test-app \
+            -p 5000:5000 \
+            -e ENVIRONMENT=test \
+            devops-platform-app:test
+
+          # Wait for the container to be healthy
+          echo "Waiting for container to become healthy..."
+          for i in $(seq 1 12); do
+            STATUS=$(docker inspect --format='{{.State.Health.Status}}' test-app 2>/dev/null || echo "starting")
+            echo "  Attempt $i: $STATUS"
+            if [ "$STATUS" = "healthy" ]; then
+              echo "Container is healthy"
+              break
+            fi
+            if [ "$i" = "12" ]; then
+              echo "Container did not become healthy in time"
+              docker logs test-app
+              exit 1
+            fi
+            sleep 5
+          done
+
+          # Test root endpoint
+          echo "Testing GET /"
+          RESPONSE=$(curl -sf http://localhost:5000/)
+          echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['status']=='running', 'Status not running'"
+          echo "  Root endpoint: OK"
+
+          # Test health endpoint
+          echo "Testing GET /health"
+          HEALTH=$(curl -sf http://localhost:5000/health)
+          echo "$HEALTH" | python3 -c "import json,sys; d=json.load(sys.stdin); assert d['status']=='healthy', 'Status not healthy'"
+          echo "  Health endpoint: OK"
+
+      - name: Run Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: devops-platform-app:test
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: "0"  # Report findings, don't fail the build for portfolio
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Clean up test container
+        if: always()
+        run: |
+          docker stop test-app 2>/dev/null || true
+          docker rm test-app 2>/dev/null || true

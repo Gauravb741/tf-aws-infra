@@ -1,0 +1,38 @@
+# =============================================================================
+# DEV ENVIRONMENT — Example Variable Values
+#
+# Copy this file to terraform.tfvars and fill in your real values.
+# NEVER commit terraform.tfvars to Git — it contains environment-specific
+# values that may include sensitive data.
+# =============================================================================
+
+project_name = "devops-platform"
+environment  = "dev"
+aws_region   = "us-east-1"
+
+# Networking — dev uses 10.0.x.x range
+vpc_cidr            = "10.0.0.0/16"
+public_subnet_cidr  = "10.0.1.0/24"
+private_subnet_cidr = "10.0.2.0/24"
+
+# EC2 — t3.micro is free-tier eligible
+instance_type = "t3.micro"
+
+# Application
+application_port = 5000
+
+# SSH — replace with your actual IP address (curl ifconfig.me)
+# IMPORTANT: Never use 0.0.0.0/0 in production
+allowed_ssh_cidr = "YOUR_IP_ADDRESS/32"
+
+# Key pair — create one in AWS Console or with aws ec2 create-key-pair
+# Leave empty "" to use SSM Session Manager instead of SSH
+key_pair_name = ""
+
+# Docker — replace with your Docker Hub username
+docker_image = "YOUR_DOCKERHUB_USERNAME/devops-platform-app:1.0.0"
+app_version  = "1.0.0"
+
+# CloudWatch
+cpu_alarm_threshold = 80
+log_retention_days  = 7

@@ -1,0 +1,26 @@
+# =============================================================================
+# PROD ENVIRONMENT — Example Variable Values
+# =============================================================================
+
+project_name = "devops-platform"
+environment  = "prod"
+aws_region   = "us-east-1"
+
+# Prod uses 10.1.x.x to avoid CIDR conflicts with dev (10.0.x.x)
+vpc_cidr            = "10.1.0.0/16"
+public_subnet_cidr  = "10.1.1.0/24"
+private_subnet_cidr = "10.1.2.0/24"
+
+instance_type    = "t3.micro"
+application_port = 5000
+
+# Production: restrict SSH to your IP only
+allowed_ssh_cidr = "YOUR_IP_ADDRESS/32"
+key_pair_name    = ""
+
+docker_image = "YOUR_DOCKERHUB_USERNAME/devops-platform-app:1.0.0"
+app_version  = "1.0.0"
+
+# Production: lower threshold (alert earlier)
+cpu_alarm_threshold = 70
+log_retention_days  = 30
